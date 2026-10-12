@@ -1,12 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { Droplet, Activity, Zap, Wifi, Clock, ShieldCheck, ShieldAlert, RefreshCw, BarChart3, AlertTriangle, ArrowLeft, Building2 } from "lucide-react";
+import { Droplet, Activity, Zap, Wifi, Clock, ShieldCheck, ShieldAlert, RefreshCw, BarChart3, AlertTriangle, ArrowLeft, Building2, SlidersHorizontal, Trash2, Sprout, Toilet, WashingMachine, Car } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { TankIcon } from "@/components/TankIcon";
 import { SensorCard } from "@/components/SensorCard";
-import { ReuseDestinations } from "@/components/ReuseDestinations";
 import { NotificationsPanel, type AppNotification } from "@/components/NotificationsPanel";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { toast } from "sonner";
@@ -16,6 +15,46 @@ import { getBranch } from "@/lib/branches";
 const PH_MIN = 6.5;
 const PH_MAX = 8.5;
 const TURBIDITY_MAX = 300;
+
+function evaluateWaterCapabilities(ph: number, turbidity: number) {
+  const phSafe = ph >= PH_MIN && ph <= PH_MAX;
+  const turbSafe = turbidity <= TURBIDITY_MAX;
+  const basicSafe = phSafe && turbSafe;
+
+  return {
+    safe: basicSafe,
+    phSafe,
+    turbSafe,
+    // Specific thresholds per non-potable reuse type:
+    canToilet: basicSafe,
+    canIrrigation: basicSafe && turbidity <= 250,
+    canOutdoorCleaning: basicSafe && turbidity <= 200,
+    canLaundry: basicSafe && turbidity <= 100 && ph >= 6.8 && ph <= 7.8,
+  };
+}
+
+function getApprovedUsesList(capabilities: ReturnType<typeof evaluateWaterCapabilities>): string {
+  const list: string[] = [];
+  if (capabilities.canToilet) list.push("Toilet Flushing");
+  if (capabilities.canIrrigation) list.push("Garden Irrigation");
+  if (capabilities.canOutdoorCleaning) list.push("Outdoor Cleaning");
+  if (capabilities.canLaundry) list.push("Laundry Washing");
+
+  return list.length > 0 ? list.join(", ") : "None (Requires Treatment)";
+}
+
+function getRecommendations(ph: number, turbidity: number) {
+  const recs: string[] = [];
+  if (ph < PH_MIN) {
+    recs.push("Add an alkaline buffer (e.g., sodium bicarbonate) to raise pH levels.");
+  } else if (ph > PH_MAX) {
+    recs.push("Add a mild acid corrector or dilute with freshwater to lower alkalinity.");
+  }
+  if (turbidity > TURBIDITY_MAX) {
+    recs.push("Activate backwash filter cycle or add a bio-coagulant to drop suspended solids.");
+  }
+  return recs;
+}
 
 function explainUnsafe(ph: number, turbidity: number) {
   const reasons: string[] = [];
@@ -39,18 +78,12 @@ export const Route = createFileRoute("/dashboard")({
 });
 
 const scenarios = [
-  { ph: 7.1, turbidity: 85, label: "Clean greywater" },
-  { ph: 7.3, turbidity: 120, label: "Light shower runoff" },
-  { ph: 6.9, turbidity: 95, label: "Sink rinse" },
-  { ph: 10.2, turbidity: 480, label: "Soapy / contaminated" },
-  { ph: 7.0, turbidity: 70, label: "Filtered greywater" },
+  { ph: 7.1, turbidity: 85, label: "Clean greywater (All Reuse Safe)" },
+  { ph: 7.3, turbidity: 120, label: "Light shower runoff (Toilet, Irrigation & Car Wash Safe)" },
+  { ph: 6.9, turbidity: 95, label: "Sink rinse (Toilet & Laundry Safe)" },
+  { ph: 10.2, turbidity: 480, label: "Soapy / contaminated (Unsafe)" },
+  { ph: 7.0, turbidity: 70, label: "Filtered greywater (Optimal Quality)" },
 ];
-
-function evaluate(ph: number, turbidity: number) {
-  const phSafe = ph >= PH_MIN && ph <= PH_MAX;
-  const turbSafe = turbidity <= TURBIDITY_MAX;
-  return { safe: phSafe && turbSafe, phSafe, turbSafe };
-}
 
 function Dashboard() {
   const { branch: branchId } = Route.useSearch();
@@ -58,19 +91,22 @@ function Dashboard() {
   const isOffline = branch.status === "offline";
 
   const [scenarioIdx, setScenarioIdx] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
   const reading = scenarios[scenarioIdx];
-  const { safe, phSafe, turbSafe } = evaluate(reading.ph, reading.turbidity);
+  const capabilities = evaluateWaterCapabilities(reading.ph, reading.turbidity);
+  const { safe, phSafe, turbSafe } = capabilities;
+
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [phTrend, setPhTrend] = useState<number[]>([40, 55, 48, 60, 52, 58, 50, 62]);
   const [turbTrend, setTurbTrend] = useState<number[]>([30, 35, 28, 42, 38, 45, 40, 35]);
 
   const [notifications, setNotifications] = useState<AppNotification[]>([
-    { id: "1", type: "info", title: "System online", message: `${branch.name} • ESP32 streaming sensor data.`, time: "Just now", read: false },
+    { id: "1", type: "info", title: "System online", message: `${branch.name} ESP32 streaming sensor data.`, time: "Just now", read: false },
     { id: "2", type: "success", title: "Daily report", message: "Greywater stayed within safe range for 22h yesterday.", time: "2h ago", read: false },
   ]);
 
   useEffect(() => {
-    if (isOffline) return;
+    if (isOffline || isPaused) return;
     const id = setInterval(() => {
       setScenarioIdx((i) => (i + 1) % scenarios.length);
       setLastUpdate(new Date());
@@ -78,40 +114,69 @@ function Dashboard() {
       setTurbTrend((t) => [...t.slice(1), 25 + Math.random() * 60]);
     }, 6000);
     return () => clearInterval(id);
-  }, [isOffline]);
+  }, [isOffline, isPaused]);
 
   useEffect(() => {
     if (!safe && !isOffline) {
-      const reasons = explainUnsafe(reading.ph, reading.turbidity);
-      const why = reasons.join(" ");
+      setIsPaused(true);
+
+      const recs = getRecommendations(reading.ph, reading.turbidity);
       const id = crypto.randomUUID();
       setNotifications((prev) => [
-        { id, type: "alert" as const, title: "Unsafe water detected", message: why || "Sensors out of range — relay closed.", time: "Just now", read: false },
+        { 
+          id, 
+          type: "alert" as const, 
+          title: "UNSAFE WATER DETECTED — SYSTEM PAUSED", 
+          message: recs.join(" "), 
+          time: "Just now", 
+          read: false 
+        },
         ...prev,
       ].slice(0, 20));
-      const toastId = toast.error("Unsafe water — distribution stopped", {
-        description: (
-          <div className="space-y-1 mt-1">
-            {reasons.map((r, i) => (
-              <div key={i} className="flex items-start gap-1.5 text-xs">
-                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                <span>{r}</span>
-              </div>
-            ))}
-          </div>
-        ),
-        duration: 7000,
-        cancel: {
-          label: "Cancel",
-          onClick: () => toast.dismiss(toastId),
-        },
+
+      toast.error("UNSAFE WATER DETECTED — SYSTEM PAUSED", {
+        description: "Distribution halted automatically. Select an action below to proceed.",
+        duration: Infinity,
       });
+    } else if (safe && !isOffline) {
+      const approvedText = getApprovedUsesList(capabilities);
+      const id = crypto.randomUUID();
+      setNotifications((prev) => [
+        { 
+          id, 
+          type: "success" as const, 
+          title: "Water Ready for Non-Potable Reuse", 
+          message: `Quality checks passed. Approved reuse destinations: ${approvedText}.`, 
+          time: "Just now", 
+          read: false 
+        },
+        ...prev,
+      ].slice(0, 20));
     }
   }, [scenarioIdx]); // eslint-disable-line
+
+  const handleRetryTreat = () => {
+    toast.dismiss();
+    toast.success("Treatment retry initiated", { description: "Re-running filtration cycle..." });
+    setScenarioIdx(0);
+    setIsPaused(false);
+    setLastUpdate(new Date());
+  };
+
+  const handleDrainSewage = () => {
+    toast.dismiss();
+    toast.warning("Water drained to sewage", { description: "Contaminated batch safely flushed." });
+    setScenarioIdx(0);
+    setIsPaused(false);
+    setLastUpdate(new Date());
+  };
 
   const markRead = (id: string) =>
     setNotifications((p) => p.map((n) => (n.id === id ? { ...n, read: true } : n)));
   const clearAll = () => setNotifications([]);
+
+  const recommendations = getRecommendations(reading.ph, reading.turbidity);
+  const approvedUsesText = getApprovedUsesList(capabilities);
 
   return (
     <div className="min-h-screen px-4 sm:px-8 py-6 max-w-7xl mx-auto">
@@ -132,11 +197,11 @@ function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-card border border-border text-xs">
-            <span className={cn("w-2 h-2 rounded-full", isOffline ? "bg-muted-foreground" : "bg-safe animate-pulse-glow")} />
+            <span className={cn("w-2 h-2 rounded-full", isOffline ? "bg-muted-foreground" : isPaused ? "bg-amber-500 animate-pulse" : "bg-safe animate-pulse-glow")} />
             <Wifi className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="text-muted-foreground">{isOffline ? "ESP32 Offline" : "ESP32 Online"}</span>
+            <span className="text-muted-foreground">{isOffline ? "ESP32 Offline" : isPaused ? "System Paused" : "ESP32 Online"}</span>
           </div>
-          <Link to="/" >
+          <Link to="/">
             <Button variant="outline" size="sm" className="rounded-full gap-1.5">
               <Building2 className="w-4 h-4" />
               <span className="hidden sm:inline">Switch branch</span>
@@ -168,8 +233,15 @@ function Dashboard() {
               </div>
               <div className="text-white">
                 <p className="text-xs uppercase tracking-widest opacity-80">Water Status</p>
-                <h2 className="text-3xl font-bold">{safe ? "Safe for Reuse" : "Unsafe — Do Not Reuse"}</h2>
+                <h2 className="text-2xl sm:text-3xl font-bold">
+                  {safe ? "Safe for Non-Potable Reuse" : "Unsafe — System Paused"}
+                </h2>
                 <p className="text-sm opacity-90 mt-1">Sample: {reading.label}</p>
+                {safe && (
+                  <p className="text-xs font-semibold bg-white/20 backdrop-blur px-2.5 py-1 rounded-lg mt-2 inline-block">
+                    ✓ Safe for: {approvedUsesText}
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2 text-white/90 text-xs">
@@ -185,12 +257,32 @@ function Dashboard() {
               </Button>
             </div>
           </div>
+
           {!safe && (
-            <div className="mt-4 p-3 rounded-xl bg-white/10 backdrop-blur text-white text-xs space-y-1 relative z-10">
-              <p className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" /> Why this water isn't safe:</p>
-              {explainUnsafe(reading.ph, reading.turbidity).map((r, i) => (
-                <p key={i} className="opacity-95 pl-5">• {r}</p>
-              ))}
+            <div className="mt-4 p-4 rounded-xl bg-black/30 backdrop-blur text-white text-xs space-y-3 relative z-10 border border-white/20 shadow-2xl">
+              <p className="font-bold flex items-center gap-1.5 text-sm text-amber-300">
+                <AlertTriangle className="w-4 h-4" /> Automatic Action Required — System Paused
+              </p>
+              <div className="space-y-1">
+                <p className="font-semibold text-white/90">Why this water isn't safe:</p>
+                {explainUnsafe(reading.ph, reading.turbidity).map((r, i) => (
+                  <p key={i} className="opacity-90 pl-3">• {r}</p>
+                ))}
+              </div>
+              <div className="space-y-1 pt-1">
+                <p className="font-semibold text-white/90">Recommendations:</p>
+                {recommendations.map((rec, i) => (
+                  <p key={i} className="opacity-90 pl-3">• {rec}</p>
+                ))}
+              </div>
+              <div className="flex items-center gap-3 pt-2">
+                <Button size="sm" variant="secondary" className="gap-1.5 text-xs bg-white text-slate-900 hover:bg-slate-100 font-bold" onClick={handleRetryTreat}>
+                  <SlidersHorizontal className="w-3.5 h-3.5" /> Try Again (Re-treat Water)
+                </Button>
+                <Button size="sm" variant="destructive" className="gap-1.5 text-xs bg-red-600 hover:bg-red-700 text-white font-bold" onClick={handleDrainSewage}>
+                  <Trash2 className="w-3.5 h-3.5" /> Drain to Sewage
+                </Button>
+              </div>
             </div>
           )}
         </Card>
@@ -227,17 +319,65 @@ function Dashboard() {
               </div>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 justify-items-center">
-              <TankIcon label="Inlet Tank" safe={true} level={78} role="Catches your used water" description="This is the first stop. Water from your shower, basin and laundry collects here before any cleaning happens." />
-              <TankIcon label="Treatment" safe={safe} level={64} role="Cleans the water" description="Filters and sensors check the water here. If it's still dirty, it stays here and won't move forward." />
-              <TankIcon label="Storage" safe={safe} level={52} role="Holds clean water" description="Once the water passes the safety check, it rests in this tank until you need it." />
-              <TankIcon label="Distribution" safe={safe} level={safe ? 70 : 12} role="Sends water to plants & toilet" description="Pipes the clean water to your garden, toilet flush or outdoor tap. Closes its valve automatically if unsafe." />
+              <TankIcon label="Inlet Tank" safe={true} level={78} role="Catches your used water" description="First collection reservoir for greywater." />
+              <TankIcon label="Treatment" safe={safe} level={64} role="Cleans the water" description="Filters and neutralizers active." />
+              <TankIcon label="Storage" safe={safe} level={52} role="Holds clean water" description="Ready for non-potable reuse." />
+              <TankIcon label="Distribution" safe={safe} level={safe ? 70 : 12} role="Non-potable feed" description="Pipes water to approved destinations." />
             </div>
           </Card>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
             <div className="lg:col-span-2">
-              <ReuseDestinations safe={safe} />
+              <Card className="p-6 bg-card border-border/60">
+                <div className="flex items-center justify-between mb-5">
+                  <div>
+                    <h3 className="text-lg font-semibold">Reuse Destinations</h3>
+                    <p className="text-xs text-muted-foreground">Individual green/red status per non-potable reuse requirement</p>
+                  </div>
+                  <span className={cn("text-xs font-semibold px-3 py-1.5 rounded-full", safe ? "bg-safe/15 text-safe" : "bg-unsafe/15 text-unsafe")}>
+                    {safe ? "Flow Active" : "Flow Stopped"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* Toilet Flushing */}
+                  <div className={cn("p-4 rounded-2xl border transition-all", capabilities.canToilet ? "bg-safe/10 border-safe/40 text-foreground" : "bg-unsafe/10 border-unsafe/30 text-muted-foreground")}>
+                    <Toilet className={cn("w-7 h-7 mb-2", capabilities.canToilet ? "text-safe" : "text-unsafe")} />
+                    <p className="text-xs font-bold">Toilet Flushing</p>
+                    <p className={cn("text-[10px] font-semibold mt-0.5", capabilities.canToilet ? "text-safe" : "text-unsafe")}>
+                      {capabilities.canToilet ? "Safe for reuse" : "Unsafe"}
+                    </p>
+                  </div>
+
+                  {/* Garden Irrigation */}
+                  <div className={cn("p-4 rounded-2xl border transition-all", capabilities.canIrrigation ? "bg-safe/10 border-safe/40 text-foreground" : "bg-unsafe/10 border-unsafe/30 text-muted-foreground")}>
+                    <Sprout className={cn("w-7 h-7 mb-2", capabilities.canIrrigation ? "text-safe" : "text-unsafe")} />
+                    <p className="text-xs font-bold">Garden Irrigation</p>
+                    <p className={cn("text-[10px] font-semibold mt-0.5", capabilities.canIrrigation ? "text-safe" : "text-unsafe")}>
+                      {capabilities.canIrrigation ? "Safe for reuse" : "Unsafe"}
+                    </p>
+                  </div>
+
+                  {/* Outdoor Cleaning */}
+                  <div className={cn("p-4 rounded-2xl border transition-all", capabilities.canOutdoorCleaning ? "bg-safe/10 border-safe/40 text-foreground" : "bg-unsafe/10 border-unsafe/30 text-muted-foreground")}>
+                    <Car className={cn("w-7 h-7 mb-2", capabilities.canOutdoorCleaning ? "text-safe" : "text-unsafe")} />
+                    <p className="text-xs font-bold">Outdoor Cleaning</p>
+                    <p className={cn("text-[10px] font-semibold mt-0.5", capabilities.canOutdoorCleaning ? "text-safe" : "text-unsafe")}>
+                      {capabilities.canOutdoorCleaning ? "Safe for reuse" : "Unsafe"}
+                    </p>
+                  </div>
+
+                  {/* Laundry Washing */}
+                  <div className={cn("p-4 rounded-2xl border transition-all", capabilities.canLaundry ? "bg-safe/10 border-safe/40 text-foreground" : "bg-unsafe/10 border-unsafe/30 text-muted-foreground")}>
+                    <WashingMachine className={cn("w-7 h-7 mb-2", capabilities.canLaundry ? "text-safe" : "text-unsafe")} />
+                    <p className="text-xs font-bold">Laundry Washing</p>
+                    <p className={cn("text-[10px] font-semibold mt-0.5", capabilities.canLaundry ? "text-safe" : "text-unsafe")}>
+                      {capabilities.canLaundry ? "Safe for reuse" : "Requires <100 NTU"}
+                    </p>
+                  </div>
+                </div>
+              </Card>
             </div>
+
             <Card className="p-6 bg-card border-border">
               <h3 className="text-lg font-semibold mb-1">Actuators</h3>
               <p className="text-xs text-muted-foreground mb-4">Relay & LED state</p>
