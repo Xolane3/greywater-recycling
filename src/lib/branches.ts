@@ -3,6 +3,8 @@ export type Branch = {
   name: string;
   campus: string;
   city: string;
+  lat: number;
+  lng: number;
   purchaserId: string;
   systemsOnline: number;
   totalSystems: number;
@@ -48,12 +50,13 @@ export const PURCHASERS: Purchaser[] = [
 ];
 
 export const BRANCHES: Branch[] = [
-
   {
     id: "up-hatfield",
     name: "UP — Hatfield",
     campus: "Hatfield Student Village",
     city: "Pretoria",
+    lat: -25.7545,
+    lng: 28.2314,
     purchaserId: "balwin",
     systemsOnline: 2,
     totalSystems: 2,
@@ -62,10 +65,12 @@ export const BRANCHES: Branch[] = [
     savedToday: 152,
   },
   {
-    id: "up-hatfield",
+    id: "up-mamelodi",
     name: "UP — Mamelodi",
     campus: "Mamelodi Student Village",
     city: "Pretoria",
+    lat: -25.7200,
+    lng: 28.4000,
     purchaserId: "balwin",
     systemsOnline: 2,
     totalSystems: 2,
@@ -78,6 +83,8 @@ export const BRANCHES: Branch[] = [
     name: "UJ — Auckland Park",
     campus: "Sophiatown Residence",
     city: "Johannesburg",
+    lat: -26.1800,
+    lng: 28.0000,
     purchaserId: "varsity-living",
     systemsOnline: 0,
     totalSystems: 2,
@@ -90,6 +97,8 @@ export const BRANCHES: Branch[] = [
     name: "UJ — Soweto Campus",
     campus: "Soweto Res East",
     city: "Johannesburg",
+    lat: -26.2600,
+    lng: 27.9200,
     purchaserId: "varsity-living",
     systemsOnline: 2,
     totalSystems: 2,
@@ -102,6 +111,8 @@ export const BRANCHES: Branch[] = [
     name: "UKZN — Westville",
     campus: "Westville Residences",
     city: "Durban",
+    lat: -29.8179,
+    lng: 30.9428,
     purchaserId: "kovacs",
     systemsOnline: 1,
     totalSystems: 2,
@@ -114,6 +125,8 @@ export const BRANCHES: Branch[] = [
     name: "NWU — Potchefstroom",
     campus: "Village Res",
     city: "Potchefstroom",
+    lat: -26.6934,
+    lng: 27.0971,
     purchaserId: "kovacs",
     systemsOnline: 2,
     totalSystems: 2,
