@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { Navigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
 import { Droplet, MapPin, ArrowLeft, Building2, HardHat, ShieldCheck, Wifi } from "lucide-react";
@@ -52,9 +53,12 @@ function SitesMapPage() {
     { id: "2", type: "alert", title: "UJ — Auckland Park offline", message: "No sensor data received for 3 hours.", time: "3h ago", read: false },
   ]);
 
-  if (!ready || !user) {
-    return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
-  }
+  if (!ready) {
+  return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+}
+if (!user) {
+  return <Navigate to="/login" />;
+}
 
   const assignedBranches = visibleBranches(user);
   const company = user.purchaserId ? getPurchaser(user.purchaserId)?.company : undefined;
