@@ -1,14 +1,15 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { Navigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link, useNavigate, Navigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { Droplet, MapPin, ArrowLeft, Building2, HardHat, ShieldCheck, Wifi } from "lucide-react";
+import type { Map as LeafletMap, Marker } from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { Droplet, MapPin, ArrowLeft, Building2, HardHat, ShieldCheck, Wifi, ExternalLink } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { NotificationsPanel, type AppNotification } from "@/components/NotificationsPanel";
 import { ProfileMenu } from "@/components/ProfileMenu";
-import { BRANCHES, getPurchaser, getBranch, type Branch } from "@/lib/branches";
+import { BRANCHES, getPurchaser, type Branch } from "@/lib/branches";
 import { useSession, visibleBranches, roleLabel } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -19,34 +20,168 @@ export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "Sites Map — Amanzi Mpilo" },
-      { name: "description", content: "Interactive map view showing purchaser owned and site operator assigned branches." },
+      { name: "description", content: "Live map view showing purchaser owned and site operator assigned branches." },
     ],
   }),
   component: SitesMapPage,
 });
 
-// Helper to project GPS Lat/Lng onto relative percentage overlay coordinates for South Africa scope
-function getGeoPosition(lat: number, lng: number) {
-  // Bounding box for South Africa branch extent
-  const minLat = -30.5;
-  const maxLat = -25.0;
-  const minLng = 26.5;
-  const maxLng = 31.5;
+const STATUS_COLOR: Record<Branch["status"], string> = {
+  healthy: "#16a34a",
+  attention: "#f59e0b",
+  offline: "#dc2626",
+};
 
-  const top = ((maxLat - lat) / (maxLat - minLat)) * 100;
-  const left = ((lng - minLng) / (maxLng - minLng)) * 100;
+const STATUS_LABEL: Record<Branch["status"], string> = {
+  healthy: "Online",
+  attention: "Needs attention",
+  offline: "Offline",
+};
 
-  return {
-    top: `${Math.max(8, Math.min(92, top))}%`,
-    left: `${Math.max(8, Math.min(92, left))}%`,
-  };
+/**
+ * Real, live map (Leaflet + OpenStreetMap). Markers are anchored to true
+ * lat/lng, so they stay exactly on the real location while you pan / zoom.
+ * Leaflet touches `window` on import, so it is loaded dynamically (SSR-safe).
+ */
+function BranchMap({
+  branches,
+  selectedId,
+  onOpen,
+}: {
+  branches: Branch[];
+  selectedId?: string;
+  onOpen: (id: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<LeafletMap | null>(null);
+  const leafletRef = useRef<typeof import("leaflet") | null>(null);
+  const markersRef = useRef<Marker[]>([]);
+  const branchesRef = useRef(branches);
+  const onOpenRef = useRef(onOpen);
+  const [mapReady, setMapReady] = useState(false);
+
+  branchesRef.current = branches;
+  onOpenRef.current = onOpen;
+
+  // 1. Create the map once
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const L = (await import("leaflet")).default;
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      leafletRef.current = L;
+
+      const map = L.map(containerRef.current, { scrollWheelZoom: true }).setView([-27.5, 28.5], 6);
+
+      const street = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      }).addTo(map);
+
+      const satellite = L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        { maxZoom: 19, attribution: "Tiles &copy; Esri" }
+      );
+
+      L.control.layers({ Street: street, Satellite: satellite }, undefined, { position: "topright" }).addTo(map);
+
+      mapRef.current = map;
+      setMapReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+      mapRef.current?.remove();
+      mapRef.current = null;
+      markersRef.current = [];
+    };
+  }, []);
+
+  // 2. Draw markers whenever the branches / selection change
+  const markerKey = branches.map((b) => `${b.id}:${b.status}:${b.systemsOnline}`).join("|") + `#${selectedId ?? ""}`;
+
+  useEffect(() => {
+    const L = leafletRef.current;
+    const map = mapRef.current;
+    if (!mapReady || !L || !map) return;
+
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+
+    branchesRef.current.forEach((b) => {
+      const color = STATUS_COLOR[b.status];
+      const selected = b.id === selectedId;
+      const size = selected ? 1.25 : 1;
+
+      const icon = L.divIcon({
+        className: "",
+        iconSize: [36 * size, 44 * size],
+        iconAnchor: [18 * size, 44 * size], // tip of the pin sits exactly on the coordinate
+        tooltipAnchor: [0, -40 * size],
+        html: `<svg width="${36 * size}" height="${44 * size}" viewBox="0 0 36 44" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,.4))">
+          <path d="M18 0C8 0 0 8 0 18c0 13 18 26 18 26s18-13 18-26C36 8 28 0 18 0z" fill="${color}" stroke="${selected ? "#0ea5e9" : "#fff"}" stroke-width="${selected ? 3 : 2}"/>
+          <circle cx="18" cy="18" r="7" fill="#fff"/>
+        </svg>`,
+      });
+
+      const purchaser = getPurchaser(b.purchaserId);
+      const tooltip = `
+        <div style="min-width:180px;font-size:12px;line-height:1.4">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+            <strong style="font-size:13px">${b.name}</strong>
+            <span style="color:${color};font-weight:600;font-size:10px">${STATUS_LABEL[b.status]}</span>
+          </div>
+          <div style="color:#64748b">${b.campus} • ${b.city}</div>
+          <div style="color:#64748b;font-family:monospace;font-size:10px;margin-top:2px">GPS: ${b.lat.toFixed(5)}, ${b.lng.toFixed(5)}</div>
+          <div style="margin-top:4px;padding-top:4px;border-top:1px solid #e2e8f0">
+            Systems: <strong>${b.systemsOnline}/${b.totalSystems} online</strong>
+          </div>
+          ${purchaser ? `<div style="color:#0284c7;font-size:10px;margin-top:2px">${purchaser.company}</div>` : ""}
+          <div style="color:#94a3b8;font-size:10px;margin-top:4px">Click pin to open dashboard</div>
+        </div>`;
+
+      const marker = L.marker([b.lat, b.lng], { icon, title: b.name, riseOnHover: true })
+        .addTo(map)
+        .bindTooltip(tooltip, { direction: "top", opacity: 1 });
+
+      marker.on("click", () => onOpenRef.current(b.id));
+      markersRef.current.push(marker);
+    });
+  }, [mapReady, markerKey]); // eslint-disable-line
+
+  // 3. Fly to the selected site, or fit every site in view
+  useEffect(() => {
+    const L = leafletRef.current;
+    const map = mapRef.current;
+    if (!mapReady || !L || !map) return;
+
+    const list = branchesRef.current;
+    const target = selectedId ? list.find((b) => b.id === selectedId) : undefined;
+
+    if (target) {
+      map.flyTo([target.lat, target.lng], 14, { duration: 1.2 });
+    } else if (list.length === 1) {
+      map.setView([list[0].lat, list[0].lng], 14);
+    } else if (list.length > 1) {
+      map.fitBounds(L.latLngBounds(list.map((b) => [b.lat, b.lng] as [number, number])), {
+        padding: [60, 60],
+        maxZoom: 12,
+      });
+    }
+  }, [mapReady, selectedId, branches.length]);
+
+  return (
+    <div className="relative z-0 w-full h-[520px] rounded-xl overflow-hidden border border-border bg-muted">
+      <div ref={containerRef} className="w-full h-full" />
+    </div>
+  );
 }
 
 function SitesMapPage() {
   const navigate = useNavigate();
   const { user, ready } = useSession();
   const { branch: branchId } = Route.useSearch();
-  const activeBranch = getBranch(branchId);
 
   const [notifications, setNotifications] = useState<AppNotification[]>([
     { id: "1", type: "info", title: "Map view active", message: "Showing live site locations on map.", time: "Just now", read: false },
@@ -54,22 +189,23 @@ function SitesMapPage() {
   ]);
 
   if (!ready) {
-  return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
-}
-if (!user) {
-  return <Navigate to="/login" />;
-}
+    return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+  }
+  if (!user) {
+    return <Navigate to="/login" />;
+  }
 
   const assignedBranches = visibleBranches(user);
   const company = user.purchaserId ? getPurchaser(user.purchaserId)?.company : undefined;
+  const selected = assignedBranches.find((b) => b.id === branchId);
 
   const markRead = (id: string) =>
     setNotifications((p) => p.map((n) => (n.id === id ? { ...n, read: true } : n)));
 
   const RoleIcon = user.role === "admin" ? ShieldCheck : user.role === "purchaser" ? Building2 : HardHat;
 
-  // Generate dynamic Google Maps Embed URL centered at active site's exact GPS location
-  const mapEmbedUrl = `https://maps.google.com/maps?q=${activeBranch.lat},${activeBranch.lng}&z=11&output=embed`;
+  const openDashboard = (id: string) => navigate({ to: "/dashboard", search: { branch: id } });
+  const focusOnMap = (id: string) => navigate({ to: "/", search: { branch: id } });
 
   return (
     <div className="min-h-screen px-4 sm:px-8 py-6 max-w-7xl mx-auto flex flex-col justify-between">
@@ -121,89 +257,32 @@ if (!user) {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
             <div>
               <h3 className="text-lg font-semibold flex items-center gap-2">
-                <MapPin className="w-5 h-5 text-primary" /> Exact Branch Map Locations
+                <MapPin className="w-5 h-5 text-primary" /> Live Branch Map
               </h3>
               <p className="text-xs text-muted-foreground">
-                Showing precise GPS positions for {activeBranch.name} ({activeBranch.lat}, {activeBranch.lng}).
+                {selected
+                  ? `Focused on ${selected.name} (${selected.lat.toFixed(5)}, ${selected.lng.toFixed(5)}). Drag or zoom freely.`
+                  : "Drag and zoom freely — pins stay on each site's real GPS location."}
               </p>
             </div>
 
             <div className="flex items-center gap-4 text-xs">
               <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-safe animate-pulse-glow inline-block" />
+                <span className="w-3 h-3 rounded-full inline-block" style={{ background: STATUS_COLOR.healthy }} />
                 <span className="text-muted-foreground">Online</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-full bg-unsafe inline-block" />
+                <span className="w-3 h-3 rounded-full inline-block" style={{ background: STATUS_COLOR.attention }} />
+                <span className="text-muted-foreground">Attention</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full inline-block" style={{ background: STATUS_COLOR.offline }} />
                 <span className="text-muted-foreground">Offline</span>
               </div>
             </div>
           </div>
 
-          {/* Interactive Google Map Container */}
-          <div className="relative w-full h-[520px] rounded-xl overflow-hidden border border-border bg-muted">
-            <iframe
-              title="Exact Branch Location Map"
-              src={mapEmbedUrl}
-              className="w-full h-full border-0 opacity-90"
-              loading="lazy"
-            />
-
-            {/* Geo-projected Marker Pins */}
-            <div className="absolute inset-0 pointer-events-none">
-              {assignedBranches.map((b: Branch) => {
-                const offline = b.status === "offline";
-                const isSelected = b.id === activeBranch.id;
-                const pos = getGeoPosition(b.lat, b.lng);
-                const purchaser = getPurchaser(b.purchaserId);
-
-                return (
-                  <div
-                    key={b.id}
-                    style={{ top: pos.top, left: pos.left }}
-                    className="absolute pointer-events-auto transform -translate-x-1/2 -translate-y-1/2 group z-10"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => navigate({ to: "/dashboard", search: { branch: b.id } })}
-                      className={cn(
-                        "flex items-center justify-center p-2 rounded-full shadow-2xl transition-all duration-200 transform group-hover:scale-125 focus:outline-none",
-                        offline ? "bg-unsafe text-white" : "bg-safe text-white",
-                        isSelected && "ring-4 ring-primary ring-offset-2 ring-offset-background scale-110"
-                      )}
-                    >
-                      <MapPin className="w-5 h-5 fill-current" />
-                    </button>
-
-                    {/* Hover Info Tooltip */}
-                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center z-30">
-                      <div className="bg-popover text-popover-foreground border border-border text-xs rounded-xl p-3 shadow-2xl whitespace-nowrap min-w-[190px]">
-                        <div className="flex items-center justify-between gap-3 mb-1">
-                          <span className="font-bold text-sm">{b.name}</span>
-                          <span className={cn("text-[10px] px-2 py-0.5 rounded-full font-medium", offline ? "bg-unsafe/20 text-unsafe" : "bg-safe/20 text-safe")}>
-                            {offline ? "Offline" : "Online"}
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground">{b.campus} • {b.city}</p>
-                        <p className="text-[10px] text-muted-foreground font-mono mt-1">GPS: {b.lat}, {b.lng}</p>
-                        <div className="mt-2 pt-2 border-t border-border/60 flex items-center justify-between text-[11px]">
-                          <span className="text-muted-foreground">Systems:</span>
-                          <span className="font-semibold">{b.systemsOnline}/{b.totalSystems} Online</span>
-                        </div>
-                        {purchaser && (
-                          <div className="flex items-center gap-1 mt-1 text-[10px] text-primary">
-                            <Building2 className="w-3 h-3" />
-                            <span>{purchaser.company}</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="w-2.5 h-2.5 bg-popover border-r border-b border-border rotate-45 -mt-1.5" />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <BranchMap branches={assignedBranches} selectedId={selected?.id} onOpen={openDashboard} />
 
           {/* Site Cards List */}
           <div className="mt-6">
@@ -213,26 +292,41 @@ if (!user) {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {assignedBranches.map((b) => {
                 const offline = b.status === "offline";
-                const isSelected = b.id === activeBranch.id;
+                const isSelected = b.id === selected?.id;
                 return (
                   <div
                     key={b.id}
-                    onClick={() => navigate({ to: "/dashboard", search: { branch: b.id } })}
+                    onClick={() => focusOnMap(b.id)}
                     className={cn(
-                      "p-3.5 rounded-xl cursor-pointer border transition-all flex items-center justify-between shadow-xs",
+                      "p-3.5 rounded-xl cursor-pointer border transition-all flex items-center justify-between gap-2 shadow-xs",
                       isSelected ? "border-primary bg-primary/5 ring-1 ring-primary" : "border-border bg-card hover:border-primary/50"
                     )}
                   >
                     <div className="flex items-center gap-3 truncate">
-                      <span className={cn("w-3 h-3 rounded-full shrink-0 shadow-sm", offline ? "bg-unsafe animate-pulse" : "bg-safe")} />
+                      <span
+                        className={cn("w-3 h-3 rounded-full shrink-0 shadow-sm", offline && "animate-pulse")}
+                        style={{ background: STATUS_COLOR[b.status] }}
+                      />
                       <div className="truncate">
                         <p className="text-sm font-semibold truncate">{b.name}</p>
                         <p className="text-xs text-muted-foreground">{b.campus} • {b.city}</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 shrink-0 text-xs text-muted-foreground">
                       <Wifi className="w-3.5 h-3.5" />
                       <span>{b.systemsOnline}/{b.totalSystems}</span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        title="Open dashboard"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openDashboard(b.id);
+                        }}
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </Button>
                     </div>
                   </div>
                 );
@@ -243,7 +337,7 @@ if (!user) {
       </div>
 
       <footer className="text-center text-xs text-muted-foreground py-6">
-        Amanzi Mpilo • Exact GPS Coordinates • ESP32 + pH + Turbidity sensors
+        Amanzi Mpilo • Live GPS Map • ESP32 + pH + Turbidity sensors
       </footer>
     </div>
   );
